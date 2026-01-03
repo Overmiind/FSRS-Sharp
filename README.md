@@ -1,4 +1,6 @@
 # FSRS-Sharp
+[![NuGet Downloads](https://img.shields.io/nuget/v/Fsrs.Sharp)](https://www.nuget.org/packages/Fsrs.Sharp/1.0.0)
+
 FSRS-Sharp is a .NET port of the [Python library](https://github.com/open-spaced-repetition/py-fsrs/tree/main) implementing [Free Spaced Repetition Algorithm](https://github.com/open-spaced-repetition/free-spaced-repetition-scheduler)
 
 ## Quick Start
