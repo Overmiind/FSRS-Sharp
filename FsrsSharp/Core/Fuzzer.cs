@@ -2,8 +2,6 @@
 
 public class Fuzzer : IFuzzer
 {
-    private readonly Random _random = new();
-
     private static readonly (double, double, double)[] FuzzRanges =
     [
         (2.5, 7.0, 0.15), (7.0, 20.0, 0.1), (20.0, double.PositiveInfinity, 0.05)
@@ -24,7 +22,9 @@ public class Fuzzer : IFuzzer
         double maxIvl = Math.Min(Math.Round(days + delta), maxInterval);
         minIvl = Math.Min(minIvl, maxIvl);
 
-        double fuzzed = (_random.NextDouble() * (maxIvl - minIvl + 1)) + minIvl;
+        // Random.Shared rather than an instance field: a Scheduler is a natural singleton, and a shared
+        // Random torn by concurrent reviews can degrade to returning 0 forever.
+        double fuzzed = (Random.Shared.NextDouble() * (maxIvl - minIvl + 1)) + minIvl;
         return TimeSpan.FromDays(Math.Min(Math.Round(fuzzed), maxInterval));
     }
 }

@@ -1,12 +1,18 @@
-﻿using FsrsSharp.Configuration;
+using FsrsSharp.Configuration;
 using FsrsSharp.Models;
 
 namespace FsrsSharp.Core;
 
 public class FsrsCalculator(FsrsParameters parameters) : IFsrsCalculator
 {
+    public double Decay { get; } = parameters.Decay;
+
+    public double Factor { get; } = parameters.Factor;
+
     public double InitialStability(Rating rating)
     {
+        // Guarded because this is the one place a Rating becomes an ARRAY INDEX. See Ratings.Validate.
+        Ratings.Validate(rating);
         return ClampStability(parameters.Weights[(int)rating - 1]);
     }
 
@@ -37,6 +43,8 @@ public class FsrsCalculator(FsrsParameters parameters) : IFsrsCalculator
 
         double nextDifficulty = currentDifficulty + linearDamping;
 
+        // Deliberately the UNCLAMPED D0(Easy) — matches the reference's `_initial_difficulty(Easy, clamp=False)`.
+        // With the default weights this is about -4.77, which looks wrong and is not.
         double initDiffEasyRaw = CalculateInitialDifficultyRaw(Rating.Easy);
 
         double meanReversion = parameters.Weights[7] * initDiffEasyRaw + (1 - parameters.Weights[7]) * nextDifficulty;
@@ -57,7 +65,11 @@ public class FsrsCalculator(FsrsParameters parameters) : IFsrsCalculator
     {
         double increase = Math.Exp(parameters.Weights[17] * ((int)rating - 3 + parameters.Weights[18])) *
                           Math.Pow(stability, -parameters.Weights[19]);
-        if (rating == Rating.Good || rating == Rating.Easy)
+
+        // The floor applies to every non-Again rating, Hard included. For Hard the raw multiplier is
+        // always below 1, so without this a same-day Hard would SHRINK stability by 40-60% — a card
+        // rated Hard a minute after Good would come out worse than before it was reviewed.
+        if (rating != Rating.Again)
         {
             increase = Math.Max(increase, 1.0);
         }
@@ -95,9 +107,9 @@ public class FsrsCalculator(FsrsParameters parameters) : IFsrsCalculator
         return parameters.Weights[4] - Math.Exp(parameters.Weights[5] * ((int)rating - 1)) + 1;
     }
 
-    private double ClampDifficulty(double difficulty) =>
-        Math.Min(Math.Max(difficulty, parameters.DifficultyMin), parameters.DifficultyMax);
+    private static double ClampDifficulty(double difficulty) =>
+        Math.Min(Math.Max(difficulty, FsrsParameters.DifficultyMin), FsrsParameters.DifficultyMax);
 
-    private double ClampStability(double stability) =>
-        Math.Max(stability, parameters.StabilityMin);
+    private static double ClampStability(double stability) =>
+        Math.Max(stability, FsrsParameters.StabilityMin);
 }

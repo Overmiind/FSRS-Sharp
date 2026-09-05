@@ -1,23 +1,29 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
     <PropertyGroup>
         <TargetFramework>net8.0</TargetFramework>
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
+        <!-- The XML docs on the public API are a large part of what this release adds. -->
+        <GenerateDocumentationFile>true</GenerateDocumentationFile>
+        <NoWarn>$(NoWarn);CS1591</NoWarn>
     </PropertyGroup>
     <ItemGroup>
         <None Include="README.md" Pack="true" PackagePath="\" />
+        <None Include="..\LICENSE" Pack="true" PackagePath="\" />
     </ItemGroup>
     <PropertyGroup Label="deploy">
         <PackageId>Fsrs.Sharp</PackageId>
-        <Version>1.0.0</Version>
+        <Version>2.0.0</Version>
+        <Title>FSRS-Sharp</Title>
+        <Authors>Overmind</Authors>
+        <Description>A .NET port of py-fsrs implementing the Free Spaced Repetition Scheduler (FSRS-6). Schedules flashcard reviews from a card's memory state, verified review-for-review against py-fsrs 6.3.2.</Description>
+        <PackageTags>flashcard spaced-repetition open-spaced-repetition fsrs srs anki spaced-repetition-algorithm osr dotnet c#</PackageTags>
         <RepositoryUrl>https://github.com/Overmiind/FSRS-Sharp</RepositoryUrl>
         <RepositoryType>git</RepositoryType>
-        <PackageTags>flashcard spaced-repetition open-spaced-repetition fsrs srs anki spaced-repetition-algorithm osr dotnet c#</PackageTags>
         <PackageProjectUrl>https://github.com/Overmiind/FSRS-Sharp</PackageProjectUrl>
         <PackageLicenseExpression>MIT</PackageLicenseExpression>
         <PackageReadmeFile>README.md</PackageReadmeFile>
-        <Title>PuppeteerExtraSharp</Title>
-        <Authors>Overmind</Authors>
+        <PackageReleaseNotes>Correctness release. Elapsed time is now measured in whole days as the reference does; State.New cards schedule instead of throwing; out-of-range ratings are rejected rather than silently indexing the weight array; the fuzzer is thread-safe; FsrsParameters is immutable. Breaking: FsrsParameters.Weights is IReadOnlyList and constructor-only, GetCardRetrievability takes an optional clock, and IFsrsCalculator exposes Decay/Factor.</PackageReleaseNotes>
     </PropertyGroup>
 </Project>

@@ -1,7 +1,7 @@
-﻿namespace FsrsSharp.Models;
+namespace FsrsSharp.Models;
 
 public sealed class ReviewResult
 {
-    public Card Card { get; set; }
-    public ReviewLog ReviewLog { get; set; }
+    public required Card Card { get; init; }
+    public required ReviewLog ReviewLog { get; init; }
 }

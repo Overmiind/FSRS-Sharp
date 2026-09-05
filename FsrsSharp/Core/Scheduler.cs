@@ -1,4 +1,4 @@
-﻿using FsrsSharp.Configuration;
+using FsrsSharp.Configuration;
 using FsrsSharp.Models;
 
 namespace FsrsSharp.Core;
@@ -9,7 +9,7 @@ public class Scheduler : IScheduler
     private readonly IFsrsCalculator _calc;
     private readonly IFuzzer _fuzzer;
 
-    public Scheduler() : this(new FsrsConfig(), new FsrsCalculator(new FsrsParameters()), new Fuzzer())
+    public Scheduler() : this(new FsrsConfig())
     {
     }
 
@@ -30,8 +30,22 @@ public class Scheduler : IScheduler
         DateTimeOffset? reviewDatetime = null,
         long? reviewDuration = null)
     {
+        // Validate once, at the entry point, so an out-of-range rating fails with a clear message
+        // instead of surfacing as an IndexOutOfRangeException deep inside the weight lookup (or, on the
+        // long-term path, as a silent difficulty swing that never throws at all).
+        Ratings.Validate(rating);
+
         var now = reviewDatetime ?? DateTimeOffset.UtcNow;
         var nextCard = card.Copy();
+
+        // State.New is this port's addition - FSRS itself has only Learning/Review/Relearning. Promote it
+        // before scheduling, so a New card that already carries memory state (imported, or restored from a
+        // backup) takes the ordinary Learning path instead of falling through to the "unknown state" throw.
+        if (nextCard.State == State.New)
+        {
+            nextCard.State = State.Learning;
+            nextCard.Step ??= 0;
+        }
 
         UpdateMemoryState(nextCard, card.LastReview, now, rating);
 
@@ -45,7 +59,7 @@ public class Scheduler : IScheduler
         nextCard.LastReview = now;
         nextCard.Due = now + interval;
 
-        var log = new ReviewLog(nextCard.CardId, rating, now, (int?)reviewDuration);
+        var log = new ReviewLog(nextCard.CardId, rating, now, reviewDuration);
         return new ReviewResult()
         {
             Card = nextCard,
@@ -53,39 +67,51 @@ public class Scheduler : IScheduler
         };
     }
 
-    public double GetCardRetrievability(Card card)
+    public double GetCardRetrievability(Card card, DateTimeOffset? currentDateTime = null)
     {
         if (card.LastReview is null || card.Stability is null)
         {
             return 0;
         }
 
-        var elapsedDays = Math.Max(0, (DateTime.UtcNow - card.LastReview.Value).TotalDays);
-        return _calc.Retrievability(elapsedDays, card.Stability.Value, _config.Parameters.Decay,
-            _config.Parameters.Factor);
+        var now = currentDateTime ?? DateTimeOffset.UtcNow;
+        return _calc.Retrievability(
+            ElapsedWholeDays(card.LastReview.Value, now), card.Stability.Value, _calc.Decay, _calc.Factor);
     }
+
+    /// <summary>
+    /// Whole days between two reviews. FSRS weights are fitted on day-granular elapsed time, so this
+    /// truncates rather than using the exact fraction: feeding 3.9 days where the model expects 3
+    /// understates retrievability and inflates the stability gain on every long-term review.
+    /// </summary>
+    private static double ElapsedWholeDays(DateTimeOffset lastReview, DateTimeOffset now) =>
+        Math.Max(0, Math.Floor((now - lastReview).TotalDays));
 
     private void UpdateMemoryState(Card card, DateTimeOffset? lastReview, DateTimeOffset now, Rating rating)
     {
-        double elapsedDays = lastReview.HasValue ? (now - lastReview.Value).TotalDays : 0;
-
-        // First review (new card)
-        if (card.Stability == null || card.Difficulty == null)
+        // First review - there is no prior memory state to build on.
+        if (card.Stability is null || card.Difficulty is null)
         {
             card.Stability = _calc.InitialStability(rating);
             card.Difficulty = _calc.InitialDifficulty(rating);
             return;
         }
 
-        if (elapsedDays < 1)
+        // A missing last review is not "zero days ago": there is no interval to measure at all, which the
+        // reference treats as a long-term review with R = 0 rather than as a same-day one.
+        double? daysSinceLastReview = lastReview.HasValue
+            ? ElapsedWholeDays(lastReview.Value, now)
+            : null;
+
+        if (daysSinceLastReview is < 1)
         {
             card.Stability = _calc.ShortTermStability(card.Stability.Value, rating);
             card.Difficulty = _calc.NextDifficulty(card.Difficulty.Value, rating);
             return;
         }
 
-        double r = _calc.Retrievability(elapsedDays, card.Stability.Value, _config.Parameters.Decay,
-            _config.Parameters.Factor);
+        // Read retrievability off the card before its stability is overwritten below.
+        double r = GetCardRetrievability(card, now);
 
         card.Stability = _calc.NextStability(card.Difficulty.Value, card.Stability.Value, r, rating);
         card.Difficulty = _calc.NextDifficulty(card.Difficulty.Value, rating);
@@ -96,22 +122,32 @@ public class Scheduler : IScheduler
         switch (card.State)
         {
             case State.Learning:
-                return ProcessLearningState(card, rating);
+                return ProcessSteps(card, rating, _config.LearningSteps);
 
             case State.Review:
                 return ProcessReviewState(card, rating);
 
             case State.Relearning:
-                return ProcessRelearningState(card, rating);
+                return ProcessSteps(card, rating, _config.RelearningSteps);
 
             default:
-                throw new InvalidOperationException($"Unknown State: {card.State}");
+                throw new InvalidOperationException(
+                    $"State {card.State} is not schedulable by FSRS. Expected New, Learning, Review or Relearning.");
         }
     }
 
-    private TimeSpan ProcessLearningState(Card card, Rating rating)
+    /// <summary>
+    /// Shared step ladder for the Learning and Relearning states - the two differ only in which step
+    /// array they walk.
+    /// </summary>
+    private TimeSpan ProcessSteps(Card card, Rating rating, TimeSpan[] steps)
     {
-        if (_config.LearningSteps.Length == 0)
+        int step = card.Step ?? 0;
+
+        // Graduate when there are no steps at all, or when the card carries a step index from a scheduler
+        // configured with more steps than this one. Without the second clause a Hard rating would index
+        // past the end of the array.
+        if (steps.Length == 0 || (step >= steps.Length && rating != Rating.Again))
         {
             return GraduateToReview(card);
         }
@@ -120,92 +156,47 @@ public class Scheduler : IScheduler
         {
             case Rating.Again:
                 card.Step = 0;
-                return _config.LearningSteps[0];
+                return steps[0];
 
             case Rating.Hard:
-                if ((card.Step ?? 0) == 0)
+                // The step stays where it is; only the delay changes.
+                if (step == 0)
                 {
-                    if (_config.LearningSteps.Length >= 2)
-                        return (_config.LearningSteps[0] + _config.LearningSteps[1]) / 2.0;
-                    if (_config.LearningSteps.Length == 1)
-                        return _config.LearningSteps[0] * 1.5;
+                    return steps.Length >= 2
+                        ? (steps[0] + steps[1]) / 2.0
+                        : steps[0] * 1.5;
                 }
 
-                return _config.LearningSteps[card.Step!.Value];
+                return steps[step];
 
             case Rating.Good:
-                card.Step = (card.Step ?? 0) + 1;
-                if (card.Step >= _config.LearningSteps.Length)
+                if (step + 1 >= steps.Length)
                 {
                     return GraduateToReview(card);
                 }
 
-                return _config.LearningSteps[card.Step.Value];
+                card.Step = step + 1;
+                return steps[step + 1];
 
             case Rating.Easy:
                 return GraduateToReview(card);
 
             default:
-                throw new ArgumentOutOfRangeException(nameof(rating));
+                throw new ArgumentOutOfRangeException(nameof(rating), rating, "Unknown rating.");
         }
     }
 
     private TimeSpan ProcessReviewState(Card card, Rating rating)
     {
-        if (rating == Rating.Again)
+        if (rating == Rating.Again && _config.RelearningSteps.Length > 0)
         {
-            if (_config.RelearningSteps.Length == 0)
-            {
-                return CalculateReviewInterval(card.Stability!.Value);
-            }
-
             card.State = State.Relearning;
             card.Step = 0;
             return _config.RelearningSteps[0];
         }
 
+        // With no relearning steps configured a lapse keeps the card in the Review state.
         return CalculateReviewInterval(card.Stability!.Value);
-    }
-
-    private TimeSpan ProcessRelearningState(Card card, Rating rating)
-    {
-        if (_config.RelearningSteps.Length == 0)
-        {
-            return GraduateToReview(card);
-        }
-
-        switch (rating)
-        {
-            case Rating.Again:
-                card.Step = 0;
-                return _config.RelearningSteps[0];
-
-            case Rating.Hard:
-                if ((card.Step ?? 0) == 0)
-                {
-                    if (_config.RelearningSteps.Length >= 2)
-                        return (_config.RelearningSteps[0] + _config.RelearningSteps[1]) / 2.0;
-                    if (_config.RelearningSteps.Length == 1)
-                        return _config.RelearningSteps[0] * 1.5;
-                }
-
-                return _config.RelearningSteps[card.Step!.Value];
-
-            case Rating.Good:
-                card.Step = (card.Step ?? 0) + 1;
-                if (card.Step >= _config.RelearningSteps.Length)
-                {
-                    return GraduateToReview(card);
-                }
-
-                return _config.RelearningSteps[card.Step.Value];
-
-            case Rating.Easy:
-                return GraduateToReview(card);
-
-            default:
-                throw new ArgumentOutOfRangeException(nameof(rating));
-        }
     }
 
     private TimeSpan GraduateToReview(Card card)
@@ -220,8 +211,8 @@ public class Scheduler : IScheduler
         double days = _calc.NextInterval(
             stability,
             _config.DesiredRetention,
-            _config.Parameters.Decay,
-            _config.Parameters.Factor,
+            _calc.Decay,
+            _calc.Factor,
             _config.MaximumInterval);
 
         return TimeSpan.FromDays(days);
